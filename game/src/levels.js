@@ -1,0 +1,122 @@
+// The three heists. Each level is a 32 by 18 tile map, one character per tile:
+//
+//   '#' wall (blocks movement and sight)      '.' floor
+//   'o' furniture: a display case, desk or slot machine (blocks movement and sight)
+//   'P' where the thief starts                'E' the exit door
+//   'L' gold bars $500   'J' jewel $1,500   'A' painting $2,500   'V' vault gold $5,000
+//
+// Guards walk their waypoints and pause at each; cameras sit on a wall tile and sweep.
+// All names, places and loot are invented for this game.
+export const LEVELS = [
+  {
+    name: 'The Aurelia Gallery',
+    brief: 'A quiet night at the Aurelia Gallery. Lift the Star Diamond and $6,000 of art, then slip out the east door.',
+    target: 6000,
+    parSeconds: 150,
+    map: [
+      '################################',
+      '#....oo.........oo.............#',
+      '#....oo....A....oo.....J.......#',
+      '#..............................#',
+      '#..L.....####........####......#',
+      '#........#..#........#..#......#',
+      '#..##....#..#...L....#..#......#',
+      '#..#.....#..#........#..#..V...#',
+      '#..#.J...#..#........#..#......#',
+      '#..#.....#..#........#..#......#',
+      '#..##....#..#...L....#..#......#',
+      '#........#..#........#..#......#',
+      '#..L.....####........####......#',
+      '#..............................#',
+      '#....oo.........oo.............#',
+      '#....oo....L....oo.....A.......#',
+      '#..P..........................E#',
+      '################################',
+    ],
+    guards: [
+      { waypoints: [[5, 3], [26, 3]], pause: 1.2 },
+      { waypoints: [[14, 4], [14, 13]], pause: 0.8 },
+      { waypoints: [[27, 5], [27, 12]], pause: 0.8 },
+    ],
+    cameras: [
+      { tile: [14, 0], baseAngle: Math.PI / 2, sweep: 0.9 },
+      { tile: [14, 17], baseAngle: -Math.PI / 2, sweep: 0.9 },
+    ],
+  },
+  {
+    name: 'Meridian Bank',
+    brief: 'Meridian Bank keeps its gold behind a vault door and three cameras. Take $16,000 and be gone before the alarm settles.',
+    target: 16000,
+    parSeconds: 210,
+    map: [
+      '################################',
+      '#..oo........######............#',
+      '#.L.oo.......#.VV.#.....A......#',
+      '#............#....#............#',
+      '#..####......##..##....####....#',
+      '#..#........................#..#',
+      '#..#.J...................J..#..#',
+      '#..#........................#..#',
+      '#..####..o.........o...####....#',
+      '#........o.........o...........#',
+      '#..L.....o.........o.....L.....#',
+      '#........o.........o...........#',
+      '#..####..o.........o...####....#',
+      '#..............................#',
+      '#..oo....................oo....#',
+      '#..oo........V...........oo....#',
+      '#..P..........................E#',
+      '################################',
+    ],
+    guards: [
+      { waypoints: [[5, 3], [26, 3]], pause: 1.0 },
+      { waypoints: [[10, 6], [10, 13]], pause: 0.8 },
+      { waypoints: [[21, 6], [21, 13]], pause: 0.8 },
+      { waypoints: [[11, 9], [18, 9]], pause: 1.4 },
+    ],
+    cameras: [
+      { tile: [8, 0], baseAngle: Math.PI / 2, sweep: 0.8 },
+      { tile: [0, 8], baseAngle: 0, sweep: 0.9 },
+      { tile: [31, 8], baseAngle: Math.PI, sweep: 0.9 },
+    ],
+  },
+  {
+    name: 'The Gilded Casino',
+    brief: 'The Gilded Casino never sleeps, and neither do its five guards. Empty the cashier cage: $18,000, then vanish.',
+    target: 18000,
+    parSeconds: 270,
+    map: [
+      '################################',
+      '#..oo........######............#',
+      '#.L.oo.......#.VV.#.....A......#',
+      '#............#....#............#',
+      '#..####......##..##....####....#',
+      '#..............................#',
+      '#..o..o..o.........o..o..o.....#',
+      '#..............................#',
+      '#..o..o..o....J..J..o..o..o....#',
+      '#..............................#',
+      '#..o..o..o.........o..o..o.....#',
+      '#..............................#',
+      '#..L.......####..........L.....#',
+      '#..........#....#..............#',
+      '#..o..o.....A...#....o..o......#',
+      '#..........#....#..............#',
+      '#..P.......####..........V....E#',
+      '################################',
+    ],
+    guards: [
+      { waypoints: [[4, 5], [27, 5]], pause: 1.0 },
+      { waypoints: [[4, 11], [27, 11]], pause: 1.0 },
+      { waypoints: [[15, 5], [15, 13]], pause: 0.8 },
+      { waypoints: [[8, 7], [8, 15]], pause: 0.8 },
+      { waypoints: [[23, 7], [23, 15]], pause: 0.8 },
+    ],
+    cameras: [
+      { tile: [8, 0], baseAngle: Math.PI / 2, sweep: 0.8 },
+      { tile: [0, 5], baseAngle: 0, sweep: 0.9 },
+      { tile: [31, 11], baseAngle: Math.PI, sweep: 0.9 },
+      { tile: [8, 17], baseAngle: -Math.PI / 2, sweep: 0.8 },
+    ],
+  },
+];
