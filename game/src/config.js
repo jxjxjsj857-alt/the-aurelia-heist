@@ -1,99 +1,94 @@
-// All tuning numbers and colours for The Aurelia Heist, in one place. The playfield is a
-// fixed 1280 by 720 logical area; the renderer scales it to the window, so no rule here
-// depends on the size of the screen it ends up on.
-export const FIELD = { width: 1280, height: 720 };
+// config.js — tuning and palette for The Aurelia Heist.
+// One clear job: every number the game balances on lives here, so the
+// world, renderer and shots all agree on the same rules.
 
-/** One map tile, in pixels. Every map is 32 tiles wide and 18 tall. */
 export const TILE = 40;
+export const COLS = 32;
+export const ROWS = 18;
+export const VIEW_W = COLS * TILE; // 1280
+export const VIEW_H = ROWS * TILE; // 720
 
-/** The simulation's fixed step, in seconds: 60 updates a second, whatever the display does. */
-export const STEP = 1 / 60;
+// Movement speeds, in tiles per second.
+export const THIEF_WALK_SPEED = 3.6;
+export const THIEF_SNEAK_SPEED = 2.0;
+export const GUARD_PATROL_SPEED = 1.7;
+export const GUARD_CHASE_SPEED = 2.9;
+export const GUARD_INVESTIGATE_SPEED = 2.3;
 
-export const PLAYER = {
-  radius: 15,
-  walkSpeed: 182,
-  sneakSpeed: 98,
-  /** How close a guard must get before the thief is caught. */
-  catchDistance: 27,
-};
+// Vision: how far a watcher can see, in tiles, and how wide the cone is.
+export const GUARD_SIGHT_RANGE = 5.6;
+export const GUARD_SNEAK_RANGE = 2.8; // sneaking halves the range
+export const GUARD_FOV = (75 * Math.PI) / 180;
+export const CAMERA_SIGHT_RANGE = 6.2;
+export const CAMERA_SNEAK_RANGE = 3.1;
+export const CAMERA_FOV = (55 * Math.PI) / 180;
+export const CAMERA_SWEEP = (42 * Math.PI) / 180; // swing either side of base angle
+export const CAMERA_SWEEP_SPEED = 0.55; // radians per second
 
-export const GUARD = {
-  patrolSpeed: 74,
-  chaseSpeed: 198,
-  /** Seconds a guard waits at each patrol waypoint. */
-  waypointPause: 1.1,
-  /** How far a guard can see, in pixels. Halved against a sneaking thief. */
-  visionRange: 240,
-  /** Half of a guard's vision cone, in radians. */
-  visionHalfAngle: 0.62,
-  /** Seconds without seeing the thief before a chasing guard gives up and walks back. */
-  loseSightAfter: 3.0,
-};
+// Alarm meter 0..100. Being watched fills it; breaking line of sight drains it.
+// Cameras sweep, so they only hold the thief in their cone part of the
+// time — their rate is higher so a sweeping camera still builds real
+// pressure instead of being cancelled out by the decay.
+export const ALARM_GUARD_RATE = 38;
+export const ALARM_CAMERA_RATE = 55;
+export const ALARM_DECAY_RATE = 10;
+export const ALARM_MAX = 100;
 
-export const CAMERA = {
-  visionRange: 270,
-  visionHalfAngle: 0.5,
-  /** Radians per second of the sweep. */
-  sweepSpeed: 0.55,
-};
+// Loot.
+export const LOOT_SMALL_VALUE = 250;
+export const LOOT_PAINTING_VALUE = 2000;
+export const LOOT_VAULT_VALUE = 4000;
+export const GRAB_TIME = 1.0; // seconds standing next to big loot
+export const GRAB_RADIUS = 1.35; // tiles
+export const PICKUP_RADIUS = 0.65; // tiles, small loot on touch
+export const BUST_RADIUS = 0.55; // tiles, a guard touching the thief
 
-export const ALARM = {
-  /** Per second while a guard has eyes on the thief. */
-  guardSeen: 58,
-  /** Per second while a camera has eyes on the thief. */
-  cameraSeen: 38,
-  /** Per second while nobody sees the thief and the alarm is off. */
-  decay: 9,
-  /** Per second while the alarm is on and nobody sees the thief. */
-  decayAlarmed: 5,
-  /** The alarm switches itself off again below this value. */
-  offBelow: 35,
-};
+// Coin toss: a distraction tool. Three per job, each one costs $100 of haul.
+export const COINS_PER_JOB = 3;
+export const COIN_COST = 100;
+export const COIN_THROW_DIST = 3.2; // tiles ahead of the thief
+export const COIN_HEAR_RANGE = 7; // tiles; guards inside it investigate
+export const COIN_INVESTIGATE_TIME = 2.5; // seconds a guard spends at the noise
 
-export const LOOT = {
-  /** Seconds standing next to a big loot piece to lift it. */
-  bigGrabSeconds: 1.0,
-  /** Loot values, in dollars, keyed by the map letter. */
-  values: { L: 500, J: 1500, A: 2500, V: 5000 },
-};
+// The thief and the guards are circles this big, in tiles.
+export const THIEF_RADIUS = 0.32;
+export const GUARD_RADIUS = 0.34;
+
+export const GHOST_BONUS = 1000; // perfect heist: alarm never rose on any job
 
 export const PALETTE = {
-  backdrop: '#07080d',
-  floorA: '#242031',
-  floorB: '#1d1a29',
-  rug: '#3a2333',
-  rugEdge: '#6b3a52',
-  wall: '#12141f',
-  wallTop: '#2e3249',
-  wallTrim: '#8a6d2f',
-  obstacle: '#2c2539',
-  obstacleTop: '#473c5e',
-  gold: '#f2c94c',
-  goldDeep: '#b8860b',
-  jewel: '#59d6ff',
-  art: '#e07856',
-  cash: '#7fce6e',
-  player: '#e8e4d8',
-  playerCoat: '#23232e',
-  guard: '#4a6fa5',
-  guardDark: '#2c4266',
-  cone: 'rgba(242, 201, 76, 0.20)',
-  coneEdge: 'rgba(242, 201, 76, 0.45)',
-  coneAlert: 'rgba(229, 83, 75, 0.28)',
-  coneAlertEdge: 'rgba(229, 83, 75, 0.55)',
-  camera: '#c94f4f',
+  floorA: '#1c2438',
+  floorB: '#202a40',
+  floorEdge: '#141a2a',
+  wall: '#0d1120',
+  wallTop: '#2c3a5e',
+  wallTrim: '#46587f',
+  carpet: '#3a2a4d',
+  marble: '#2a3350',
+  gold: '#f2c14e',
+  goldDark: '#b98a1e',
+  paintingFrame: '#8a6a2f',
+  paintingArt1: '#7fb3d5',
+  paintingArt2: '#c96f4a',
+  paintingArt3: '#7fb069',
+  vaultDoor: '#5a6b8a',
   exit: '#39d98a',
-  panel: '#171926',
-  panelEdge: '#3a3f5c',
-  text: '#f2efe6',
-  muted: '#9a94ad',
+  exitDark: '#1d7a4c',
+  thief: '#e8e6df',
+  thiefCoat: '#232946',
+  guard: '#d64545',
+  guardDark: '#7a1f1f',
+  camera: '#9aa7bd',
+  coneGuard: 'rgba(214, 69, 69, 0.20)',
+  coneCamera: 'rgba(242, 193, 78, 0.16)',
+  coneSpotted: 'rgba(255, 60, 60, 0.38)',
+  hudBg: 'rgba(10, 13, 24, 0.82)',
+  hudText: '#e8e6df',
+  hudMuted: '#9aa7bd',
   alarmLow: '#39d98a',
-  alarmMid: '#f2c94c',
-  alarmHigh: '#e5534b',
+  alarmMid: '#f2c14e',
+  alarmHigh: '#ff4d4d',
+  textTitle: '#f2c14e',
+  textDanger: '#ff5a5a',
+  overlay: 'rgba(6, 8, 16, 0.78)',
 };
-
-export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
-
-/** Where the best total haul is kept between visits (this browser only). */
-export const BEST_KEY = 'aurelia-heist.best';
-export const MUTE_KEY = 'aurelia-heist.muted';

@@ -1,100 +1,100 @@
-// Keyboard and pointer input. Held keys give a steering direction; one-shot presses
-// (start, pause, mute) are queued as bit flags and taken once by the loop, so a press
-// between two frames is never lost and never counted twice. A mouse click sets a walk
-// target the thief steers toward until a key is pressed or the target is reached.
-export const ACTION_CONFIRM = 1;
-export const ACTION_PAUSE = 2;
-export const ACTION_MUTE = 4;
-export const ACTION_RESTART = 8;
+// input.js — keyboard and mouse, turned into one movement direction.
+// The game reads this every fixed step; nothing here touches the canvas.
+// Click-to-move: a click on the field sets a walk target, and the keys
+// always win over the mouse while they are held.
 
-const UP = new Set(['ArrowUp', 'KeyW']);
-const DOWN = new Set(['ArrowDown', 'KeyS']);
-const LEFT = new Set(['ArrowLeft', 'KeyA']);
-const RIGHT = new Set(['ArrowRight', 'KeyD']);
-const CONFIRM = new Set(['Space', 'Enter']);
-const PAUSE = new Set(['KeyP', 'Escape']);
-const MUTE = new Set(['KeyM']);
-const RESTART = new Set(['KeyR']);
-const SNEAK = new Set(['ShiftLeft', 'ShiftRight']);
-
-export function createInput(canvas, toWorld) {
-  let up = false;
-  let down = false;
-  let left = false;
-  let right = false;
-  let sneak = false;
-  let actions = 0;
-  /** Where a click told the thief to walk, in world coordinates, or null. */
-  let clickTarget = null;
-
-  window.addEventListener('keydown', (event) => {
-    if (UP.has(event.code)) up = true;
-    else if (DOWN.has(event.code)) down = true;
-    else if (LEFT.has(event.code)) left = true;
-    else if (RIGHT.has(event.code)) right = true;
-    else if (SNEAK.has(event.code)) sneak = true;
-    else if (CONFIRM.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_CONFIRM;
-    } else if (PAUSE.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_PAUSE;
-    } else if (MUTE.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_MUTE;
-    } else if (RESTART.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_RESTART;
-    } else return;
-    event.preventDefault();
-  });
-  window.addEventListener('keyup', (event) => {
-    if (UP.has(event.code)) up = false;
-    else if (DOWN.has(event.code)) down = false;
-    else if (LEFT.has(event.code)) left = false;
-    else if (RIGHT.has(event.code)) right = false;
-    else if (SNEAK.has(event.code)) sneak = false;
-  });
-  // A key released while the tab is hidden never sends keyup: let go of everything on blur.
-  window.addEventListener('blur', () => {
-    up = false;
-    down = false;
-    left = false;
-    right = false;
-    sneak = false;
-  });
-  canvas.addEventListener('pointerdown', (event) => {
-    actions |= ACTION_CONFIRM;
-    if (toWorld) {
-      const point = toWorld(event.clientX, event.clientY);
-      if (point) clickTarget = point;
-    }
-  });
-
-  return {
-    /** The steering vector this frame: keys first, else toward the click target. */
-    move(player) {
-      const kx = (right ? 1 : 0) - (left ? 1 : 0);
-      const ky = (down ? 1 : 0) - (up ? 1 : 0);
-      if (kx !== 0 || ky !== 0) {
-        clickTarget = null;
-        return { x: kx, y: ky };
-      }
-      if (clickTarget) {
-        const dx = clickTarget.x - player.x;
-        const dy = clickTarget.y - player.y;
-        if (Math.hypot(dx, dy) < 8) {
-          clickTarget = null;
-          return { x: 0, y: 0 };
-        }
-        return { x: dx, y: dy };
-      }
-      return { x: 0, y: 0 };
-    },
-    sneak() {
-      return sneak;
-    },
-    /** The one-shot presses since the last call, as ACTION_* flags. */
-    takeActions() {
-      const taken = actions;
-      actions = 0;
-      return taken;
-    },
+export function createInput(canvas) {
+  const keys = new Set();
+  const input = {
+    mx: 0,
+    my: 0,
+    sneak: false,
+    toss: false, // edge-triggered: main.js clears it after each step
+    clickTarget: null, // {x, y} in tile coordinates, or null
+    pressed: new Set(), // keys pressed since the last poll, edge-triggered
   };
+
+  const KEYMAP = {
+    KeyW: 'up',
+    ArrowUp: 'up',
+    KeyS: 'down',
+    ArrowDown: 'down',
+    KeyA: 'left',
+    ArrowLeft: 'left',
+    KeyD: 'right',
+    ArrowRight: 'right',
+  };
+
+  function onKeyDown(event) {
+    if (event.repeat) return;
+    keys.add(event.code);
+    input.pressed.add(event.code);
+    if (KEYMAP[event.code] || event.code === 'Space') event.preventDefault();
+  }
+
+  function onKeyUp(event) {
+    keys.delete(event.code);
+  }
+
+  function onPointerDown(event) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const px = (event.clientX - rect.left) * scaleX;
+    const py = (event.clientY - rect.top) * scaleY;
+    input.clickTarget = { x: px / 40, y: py / 40 };
+    input.pressed.add('Pointer');
+  }
+
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
+  canvas.addEventListener('pointerdown', onPointerDown);
+
+  // Recompute the movement direction from the keys held right now.
+  // Falls back to the click target when no key is held.
+  input.poll = function poll(thief) {
+    let mx = 0;
+    let my = 0;
+    if (keys.has('KeyA') || keys.has('ArrowLeft')) mx -= 1;
+    if (keys.has('KeyD') || keys.has('ArrowRight')) mx += 1;
+    if (keys.has('KeyW') || keys.has('ArrowUp')) my -= 1;
+    if (keys.has('KeyS') || keys.has('ArrowDown')) my += 1;
+    if (mx !== 0 || my !== 0) {
+      input.clickTarget = null; // keys cancel a click walk
+    } else if (input.clickTarget && thief) {
+      const dx = input.clickTarget.x - thief.x;
+      const dy = input.clickTarget.y - thief.y;
+      if (Math.hypot(dx, dy) < 0.25) {
+        input.clickTarget = null;
+      } else {
+        mx = dx;
+        my = dy;
+      }
+    }
+    const len = Math.hypot(mx, my);
+    if (len > 0.01) {
+      input.mx = mx / len;
+      input.my = my / len;
+    } else {
+      input.mx = 0;
+      input.my = 0;
+    }
+    input.sneak = keys.has('ShiftLeft') || keys.has('ShiftRight');
+    return input;
+  };
+
+  // Was this key pressed since the last call? Clears as it answers.
+  input.wasPressed = function wasPressed(code) {
+    if (input.pressed.has(code)) {
+      input.pressed.delete(code);
+      return true;
+    }
+    return false;
+  };
+
+  input.clearPressed = function clearPressed() {
+    input.pressed.clear();
+  };
+
+  return input;
 }

@@ -1,133 +1,112 @@
-// Sound, synthesised with WebAudio: no audio files, no network. The context is created
-// on the first user gesture, so a page that only stages a screenshot stays silent.
-import { MUTE_KEY } from './config.js';
-
-function readMuted() {
-  try {
-    return window.localStorage.getItem(MUTE_KEY) === '1';
-  } catch {
-    return false;
-  }
-}
+// audio.js — all sound is synthesised with WebAudio: no audio files,
+// no network, nothing to load. A tiny helper builds short blips and
+// sweeps; the game calls the named effects at the right moments.
 
 export function createAudio() {
-  let context = null;
-  let master = null;
-  let muted = readMuted();
-  let siren = null;
-
-  function ensure() {
-    if (context) return true;
-    try {
-      const AudioContext = window.AudioContext ?? window.webkitAudioContext;
-      if (!AudioContext) return false;
-      context = new AudioContext();
-      master = context.createGain();
-      master.gain.value = muted ? 0 : 0.22;
-      master.connect(context.destination);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  function tone(freq, seconds, type, when, slideTo) {
-    if (!ensure() || muted) return;
-    const start = context.currentTime + (when ?? 0);
-    const osc = context.createOscillator();
-    const gain = context.createGain();
-    osc.type = type ?? 'sine';
-    osc.frequency.setValueAtTime(freq, start);
-    if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, start + seconds);
-    gain.gain.setValueAtTime(0.0001, start);
-    gain.gain.exponentialRampToValueAtTime(0.9, start + 0.015);
-    gain.gain.exponentialRampToValueAtTime(0.0001, start + seconds);
-    osc.connect(gain);
-    gain.connect(master);
-    osc.start(start);
-    osc.stop(start + seconds + 0.05);
-  }
-
-  function setMuted(value) {
-    muted = value;
-    try {
-      window.localStorage.setItem(MUTE_KEY, value ? '1' : '0');
-    } catch {
-      // Storage can be off: the mute then lasts this visit only.
-    }
-    if (master) master.gain.value = value ? 0 : 0.22;
-  }
-
-  return {
-    unlock() {
-      ensure();
-    },
-    isMuted() {
-      return muted;
-    },
-    toggleMute() {
-      setMuted(!muted);
-      return muted;
-    },
-    click() {
-      tone(660, 0.07, 'triangle');
-    },
-    pickup() {
-      tone(880, 0.09, 'sine');
-      tone(1318, 0.12, 'sine', 0.06);
-    },
-    bigLoot() {
-      tone(523, 0.12, 'triangle');
-      tone(659, 0.12, 'triangle', 0.09);
-      tone(784, 0.2, 'triangle', 0.18);
-    },
-    spotted() {
-      tone(220, 0.16, 'sawtooth', 0, 180);
-      tone(180, 0.2, 'sawtooth', 0.14, 140);
-    },
-    alarmStart() {
-      if (!ensure() || muted || siren) return;
-      siren = context.createOscillator();
-      const gain = context.createGain();
-      const lfo = context.createOscillator();
-      const lfoGain = context.createGain();
-      siren.type = 'sine';
-      siren.frequency.value = 620;
-      lfo.type = 'sine';
-      lfo.frequency.value = 1.6;
-      lfoGain.gain.value = 180;
-      lfo.connect(lfoGain);
-      lfoGain.connect(siren.frequency);
-      gain.gain.value = 0.05;
-      siren.connect(gain);
-      gain.connect(master);
-      siren.start();
-      lfo.start();
-      siren._lfo = lfo;
-      siren._gain = gain;
-    },
-    alarmStop() {
-      if (!siren) return;
-      try {
-        siren._gain.gain.setTargetAtTime(0, context.currentTime, 0.05);
-        const old = siren;
-        window.setTimeout(() => {
-          try { old.stop(); old._lfo.stop(); } catch { /* already stopped */ }
-        }, 300);
-      } catch {
-        // The context went away with the page.
-      }
-      siren = null;
-    },
-    caught() {
-      tone(160, 0.4, 'sawtooth', 0, 60);
-      tone(110, 0.5, 'square', 0.1, 55);
-    },
-    win() {
-      tone(523, 0.14, 'triangle');
-      tone(659, 0.14, 'triangle', 0.12);
-      tone(784, 0.14, 'triangle', 0.24);
-      tone(1046, 0.3, 'triangle', 0.36);
-    },
+  const audio = {
+    ctx: null,
+    muted: false,
+    alarmOsc: null,
+    alarmGain: null,
   };
+
+  audio.ensure = function ensure() {
+    if (audio.ctx) {
+      if (audio.ctx.state === 'suspended') audio.ctx.resume();
+      return;
+    }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    audio.ctx = new AC();
+  };
+
+  audio.toggleMute = function toggleMute() {
+    audio.muted = !audio.muted;
+    if (audio.alarmGain) audio.alarmGain.gain.value = 0;
+    return audio.muted;
+  };
+
+  function tone(freq, dur, type, vol, slideTo) {
+    if (!audio.ctx || audio.muted) return;
+    const t0 = audio.ctx.currentTime;
+    const osc = audio.ctx.createOscillator();
+    const gain = audio.ctx.createGain();
+    osc.type = type || 'sine';
+    osc.frequency.setValueAtTime(freq, t0);
+    if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+    gain.gain.setValueAtTime(vol || 0.12, t0);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(gain);
+    gain.connect(audio.ctx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.02);
+  }
+
+  audio.pickup = function pickup() {
+    tone(880, 0.09, 'sine', 0.1);
+    setTimeout(() => tone(1318, 0.12, 'sine', 0.08), 60);
+  };
+
+  audio.grab = function grab() {
+    tone(523, 0.1, 'triangle', 0.12);
+    setTimeout(() => tone(659, 0.1, 'triangle', 0.12), 90);
+    setTimeout(() => tone(784, 0.18, 'triangle', 0.12), 180);
+  };
+
+  audio.coin = function coin() {
+    tone(1568, 0.07, 'square', 0.05, 2093);
+  };
+
+  audio.spotted = function spotted() {
+    tone(220, 0.25, 'sawtooth', 0.1, 110);
+  };
+
+  audio.busted = function busted() {
+    tone(392, 0.18, 'sawtooth', 0.14, 196);
+    setTimeout(() => tone(311, 0.3, 'sawtooth', 0.14, 155), 170);
+  };
+
+  audio.jobDone = function jobDone() {
+    const notes = [523, 659, 784, 1047];
+    notes.forEach((note, i) => setTimeout(() => tone(note, 0.22, 'triangle', 0.12), i * 110));
+  };
+
+  audio.heistDone = function heistDone() {
+    const notes = [523, 659, 784, 1047, 1319, 1568];
+    notes.forEach((note, i) => setTimeout(() => tone(note, 0.3, 'triangle', 0.12), i * 130));
+  };
+
+  // A soft two-note pulse while the alarm is high; silent otherwise.
+  audio.setAlarmLevel = function setAlarmLevel(level) {
+    if (!audio.ctx || audio.muted) {
+      if (audio.alarmGain) audio.alarmGain.gain.value = 0;
+      return;
+    }
+    if (level < 55) {
+      if (audio.alarmGain) audio.alarmGain.gain.value = 0;
+      return;
+    }
+    if (!audio.alarmOsc) {
+      const osc = audio.ctx.createOscillator();
+      const gain = audio.ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = 660;
+      gain.gain.value = 0;
+      const lfo = audio.ctx.createOscillator();
+      const lfoGain = audio.ctx.createGain();
+      lfo.frequency.value = 2.2;
+      lfoGain.gain.value = 0.02;
+      lfo.connect(lfoGain);
+      lfoGain.connect(gain.gain);
+      osc.connect(gain);
+      gain.connect(audio.ctx.destination);
+      osc.start();
+      lfo.start();
+      audio.alarmOsc = osc;
+      audio.alarmGain = gain;
+    }
+    audio.alarmGain.gain.value = 0.015 + (level / 100) * 0.03;
+  };
+
+  return audio;
 }

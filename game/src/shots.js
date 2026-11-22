@@ -1,113 +1,125 @@
-// The screenshot scenes behind ?shot=title|stealth|spotted|vault. Each one sets the real
-// world to a chosen moment — the thief mid-room, a guard's cone sweeping past, a camera
-// watching the vault, the alarm meter high — then steps the simulation a fixed number of
-// times with no input, so the frame is what the game really looks like and the same seed
-// always gives the same frame.
-import { STEP, TILE } from './config.js';
-import { EVENT_CAUGHT, EVENT_LEVEL_DONE, EVENT_WIN } from './world.js';
-import { SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// shots.js — the four deterministic screenshot scenes.
+// Each one builds a world from a fixed seed, steps it a fixed number of
+// times, then places the thief, the guards and the loot by hand so the
+// frame shows exactly what the shot is for. No wall clock, no randomness
+// beyond the seed: the same shot always renders the same frame.
 
-const NO_MOVE = { x: 0, y: 0 };
+import { createWorld, stepWorld } from './world.js';
 
-function placeGuard(state, index, tileX, tileY, facing, chasing) {
-  const guard = state.guards[index];
-  guard.x = (tileX + 0.5) * TILE;
-  guard.y = (tileY + 0.5) * TILE;
-  guard.facing = facing;
-  guard.waiting = 0;
-  guard.chasing = chasing;
-  guard.loseSight = 0;
-  guard.seesPlayer = false;
+const IDLE = { mx: 0, my: 0, sneak: false, toss: false };
+
+function stepIdle(world, seconds) {
+  const steps = Math.round(seconds * 60);
+  for (let i = 0; i < steps; i++) stepWorld(world, IDLE, 1 / 60, { harmless: true });
 }
 
-function placePlayer(state, tileX, tileY, sneak) {
-  state.player.x = (tileX + 0.5) * TILE;
-  state.player.y = (tileY + 0.5) * TILE;
-  state.player.facing = 0;
-  state.player.sneak = sneak;
-}
-
-/** Take the loot at (tileX, tileY) and add its value to the haul, as if lifted already. */
-function takeLoot(state, tileX, tileY) {
-  for (const item of state.loot) {
-    if (!item.taken && Math.abs(item.x - (tileX + 0.5) * TILE) < 1 && Math.abs(item.y - (tileY + 0.5) * TILE) < 1) {
+function takeLoot(world, kinds, count) {
+  let taken = 0;
+  for (const item of world.loot) {
+    if (taken >= count) break;
+    if (!item.taken && kinds.includes(item.kind)) {
       item.taken = true;
-      state.lootValue += item.value;
-      state.totalLoot += item.value;
+      world.lootValue += item.value;
+      taken += 1;
     }
   }
+  return taken;
 }
 
-function settle(world, steps, harmless) {
-  for (let index = 0; index < steps; index += 1) {
-    const events = world.step(STEP, NO_MOVE, false, harmless);
-    if (events & (EVENT_CAUGHT | EVENT_LEVEL_DONE | EVENT_WIN)) break;
-  }
+function placeGuard(world, index, x, y, angle, mode) {
+  const guard = world.guards[index];
+  guard.x = x;
+  guard.y = y;
+  guard.angle = angle;
+  if (mode) guard.mode = mode;
 }
 
-/**
- * Set `world` to the named scene (title, stealth, spotted or vault; any other name is
- * title) and return the screen to draw over it and the best haul to show.
- */
-export function stageShot(name, world) {
-  const state = world.state;
-  if (name === 'stealth') {
-    world.loadLevel(0);
-    placePlayer(state, 7, 10, true);
-    placeGuard(state, 0, 20, 3, 0, false);
-    placeGuard(state, 1, 14, 11, Math.PI / 2, false);
-    placeGuard(state, 2, 27, 10, -Math.PI / 2, false);
-    takeLoot(state, 3, 4);
-    state.alarm = 8;
-    state.elapsed = 6.2;
-    settle(world, 30);
-    return { screen: SCREEN_PLAY, best: 500 };
+function faceThief(world, guard) {
+  guard.angle = Math.atan2(world.thief.y - guard.y, world.thief.x - guard.x);
+}
+
+// 1-title: the title screen over the gallery, guards mid-patrol.
+function stageTitle() {
+  const world = createWorld(0, 7);
+  stepIdle(world, 6);
+  return { screen: 'title', world, app: { jobIndex: 0, totalLoot: 0, ghost: true } };
+}
+
+// 2-stealth: mid-gallery, thief slipping past a patrol, $500 lifted,
+// the alarm barely awake at 3%.
+function stageStealth() {
+  const world = createWorld(0, 7);
+  stepIdle(world, 4);
+  world.thief.x = 12.5;
+  world.thief.y = 9.5;
+  world.thief.angle = Math.PI / 2;
+  takeLoot(world, ['small'], 2); // $500
+  world.alarm = 3;
+  world.alarmEverRose = true;
+  return { screen: 'playing', world, app: { jobIndex: 0, totalLoot: 0, ghost: false } };
+}
+
+// 3-spotted: the bank, alarm at 100%, every guard converging on the thief.
+function stageSpotted() {
+  const world = createWorld(1, 7);
+  stepIdle(world, 3);
+  world.thief.x = 15.5;
+  world.thief.y = 9.5;
+  world.thief.angle = -Math.PI / 2;
+  takeLoot(world, ['painting'], 2); // $4,000
+  takeLoot(world, ['vault'], 1); // $4,000 — $8,000 total
+  world.alarm = 100;
+  world.alarmEverRose = true;
+  world.chase = true;
+  world.spotted = true;
+  placeGuard(world, 0, 13.5, 8.5, 0, 'chase');
+  placeGuard(world, 1, 17.5, 8.5, 0, 'chase');
+  placeGuard(world, 2, 12.5, 10.5, 0, 'chase');
+  placeGuard(world, 3, 18.5, 10.5, 0, 'chase');
+  for (const guard of world.guards) faceThief(world, guard);
+  return { screen: 'playing', world, app: { jobIndex: 1, totalLoot: 6000, ghost: false } };
+}
+
+// 4-vault: inside the bank vault room, gold in hand, one more bar being
+// grabbed (ring at 70%), alarm at 33%, $12,000 already lifted.
+function stageVault() {
+  const world = createWorld(1, 7);
+  stepIdle(world, 2);
+  world.thief.x = 27.5;
+  world.thief.y = 2.5;
+  world.thief.angle = -Math.PI / 2;
+  takeLoot(world, ['painting'], 3); // $6,000
+  // Take the far vault bar (25.5, 2.5) for $4,000; the near bar at
+  // (27.5, 1.5) is the one the thief is grabbing. takeLoot takes in
+  // map order, which would take the near bar first, so pick by position.
+  const farGold = world.loot.find((item) => item.kind === 'vault' && item.x === 25.5 && item.y === 2.5);
+  if (farGold) {
+    farGold.taken = true;
+    world.lootValue += farGold.value;
   }
-  if (name === 'spotted') {
-    world.loadLevel(1);
-    placePlayer(state, 15, 5, false);
-    placeGuard(state, 0, 20, 3, 0, true);
-    placeGuard(state, 1, 10, 8, 0, false);
-    placeGuard(state, 2, 21, 8, Math.PI, false);
-    placeGuard(state, 3, 17, 7, Math.PI * 0.75, true);
-    takeLoot(state, 2, 2);
-    takeLoot(state, 5, 6);
-    takeLoot(state, 24, 2);
-    takeLoot(state, 15, 2);
-    takeLoot(state, 16, 2);
-    state.alarm = 88;
-    state.alarmed = true;
-    state.ghost = false;
-    state.elapsed = 9.4;
-    settle(world, 15);
-    return { screen: SCREEN_PLAY, best: 14500 };
+  takeLoot(world, ['small'], 8); // $2,000 — $12,000 total
+  // The one vault bar left is at (27.5, 1.5); the thief is grabbing it.
+  const lastGold = world.loot.find((item) => item.kind === 'vault' && !item.taken);
+  if (lastGold) {
+    lastGold.progress = 0.7;
+    world.grabbing = lastGold;
+    world.grabProgress = 0.7;
   }
-  if (name === 'vault') {
-    world.loadLevel(1);
-    placePlayer(state, 16, 3, false);
-    placeGuard(state, 0, 10, 3, Math.PI, false);
-    placeGuard(state, 1, 10, 8, Math.PI / 2, false);
-    placeGuard(state, 2, 21, 8, -Math.PI / 2, false);
-    placeGuard(state, 3, 15, 9, -Math.PI / 2, false);
-    takeLoot(state, 2, 2);
-    takeLoot(state, 5, 6);
-    takeLoot(state, 24, 2);
-    takeLoot(state, 15, 2);
-    takeLoot(state, 25, 6);
-    takeLoot(state, 3, 10);
-    state.alarm = 34;
-    state.elapsed = 3.1;
-    // The thief is mid-lift on the last vault pile: the progress ring is half drawn.
-    for (const item of state.loot) {
-      if (!item.taken && item.kind === 'V') {
-        state.grabTarget = item;
-        state.grabProgress = 0.6;
-      }
-    }
-    settle(world, 10);
-    return { screen: SCREEN_PLAY, best: 11500 };
-  }
-  world.reset();
-  settle(world, 300, true);
-  return { screen: SCREEN_TITLE, best: 0 };
+  world.alarm = 33;
+  world.alarmEverRose = true;
+  placeGuard(world, 1, 26.5, 6.5, -Math.PI / 2, 'patrol');
+  return { screen: 'playing', world, app: { jobIndex: 1, totalLoot: 6000, ghost: false } };
+}
+
+export const SHOT_STAGERS = {
+  title: stageTitle,
+  stealth: stageStealth,
+  spotted: stageSpotted,
+  vault: stageVault,
+};
+
+export function stageShot(name) {
+  const stager = SHOT_STAGERS[name];
+  if (!stager) throw new Error('unknown shot: ' + name);
+  return stager();
 }

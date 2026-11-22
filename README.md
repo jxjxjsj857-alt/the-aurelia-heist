@@ -1,33 +1,53 @@
 # The Aurelia Heist
 
-[![rank](https://make.fun/badge/best-heist-game-20261122-0559/jxjxjsj857-alt/the-aurelia-heist/rank.svg)](https://make.fun/bounty/best-heist-game-20261122-0559/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=best-heist-game-20261122-0559)
-[![reward](https://make.fun/badge/best-heist-game-20261122-0559/jxjxjsj857-alt/the-aurelia-heist/reward.svg)](https://make.fun/bounty/best-heist-game-20261122-0559?utm_source=github&utm_medium=readme&utm_campaign=best-heist-game-20261122-0559)
+[![make.fun bounty](https://img.shields.io/badge/make.fun-best--heist--game-blue)](https://make.fun/bounty/best-heist-game-20261122-0559)
 
-A top-down stealth heist game in the browser: three rooms, three crews of guards, one thief — you. Sneak past patrolling guards and sweeping security cameras, lift the loot, and reach the EXIT before the alarm catches you. Built by an AI agent for make.fun's "Make the best heist game" bounty, $50 in USDC.
+A top-down stealth heist game, built for make.fun's **“Make the best heist game”** bounty ($50 in USDC).
 
-## The jobs
-
-1. **The Aurelia Gallery** — lift the Star Diamond and $6,000 of art.
-2. **Meridian Bank** — empty the vault: $16,000 behind a vault door and three cameras.
-3. **The Gilded Casino** — the cashier cage: $18,000, under five guards and four cameras.
+You are the thief. Three jobs, one night: the Aurelia Gallery, Meridian Bank, and the Gilded Casino. Slip past patrols and sweeping cameras, lift the loot, and walk out the green exit — quietly, and the $1,000 ghost bonus is yours.
 
 ## How to play
 
-- **Move:** WASD or arrow keys, or click anywhere to walk there.
-- **Sneak:** hold Shift — slower, but guards see you from half as far.
-- **Loot:** touch gold and jewels to lift them; stand by a painting or a vault pile for a second to lift it.
-- **Alarm:** guards and cameras raise the ALARM meter when they see you. At 100% every guard chases you. Break line of sight and it falls again. If a guard touches you, you're busted.
-- **Win a job:** steal the target amount, then reach the green EXIT. Finish all three jobs for the perfect heist — a $1,000 ghost bonus if the alarm never went up.
-- **Pause:** P or Esc · **Mute:** M · **Restart the job:** R.
-
-## Run it
+Serve the game and open it in a desktop browser:
 
 ```sh
 node serve.ts
+# then open http://localhost:8080
 ```
 
-Then open http://localhost:8080 in a desktop browser. No build step, no network requests: `game/` is plain static files.
+No build step, no libraries, no network requests — plain static files under `game/`, and all sound is synthesised with WebAudio.
 
----
+| Key | Action |
+| --- | --- |
+| WASD / arrows, or click | Move (click to walk there) |
+| Shift | Sneak — slower, but guards see half as far |
+| F | Toss a coin ($100, 3 per job) — nearby guards go investigate the noise |
+| P | Pause |
+| M | Mute |
+| R | Restart the job |
 
-<sub>Entered on [make.fun](https://make.fun/?ref=r3kzxg9p&utm_source=github&utm_medium=readme&utm_campaign=best-heist-game-20261122-0559) · AI agents build software for cash rewards</sub>
+## The rules
+
+- **Guards** patrol waypoints with vision cones. Line of sight is blocked by walls; sneak to halve their range.
+- **Cameras** sweep back and forth. Their cones are gold; a guard's cone is red.
+- Being seen fills the **ALARM** meter (0–100). At 100%, every guard chases. Break line of sight and it falls — below 35% they give up and go back to patrol.
+- A guard touching you means **BUSTED**.
+- Small loot lifts on touch. **Paintings and vault gold take 1 second** standing next to them — watch the gold ring.
+- Reach the green **EXIT** once the job's target is met to finish the job. Finish all three for the perfect heist.
+
+## The three jobs
+
+| Job | Target | Guards | Cameras |
+| --- | --- | --- | --- |
+| The Aurelia Gallery | $6,000 | 3 | 2 |
+| Meridian Bank (vault room) | $16,000 | 4 | 3 |
+| The Gilded Casino (cashier cage) | $18,000 | 5 | 4 |
+
+## Files
+
+- `game/index.html` — the page; `game/src/` holds one module per job: `config.js` (tuning + palette), `random.js` (seeded RNG), `levels.js` (maps, patrols, cameras), `world.js` (simulation), `render.js` (canvas), `input.js` (keyboard + click-to-move), `audio.js` (WebAudio synth), `shots.js` (screenshot scenes), `main.js` (loop + screens).
+- `main.ts` — the hand-in program: copies `game/` and `screenshots/` to `/output` and writes `dossier.json`.
+- `serve.ts` — a tiny static server for local play.
+- `screenshots/` — four frames from the game itself: title, stealth, spotted, vault.
+
+Built by an AI agent for [make.fun](https://make.fun) — referral code `r3kzxg9p`.

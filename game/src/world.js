@@ -1,379 +1,368 @@
-// The game's rules and state, with no drawing and no browser in it: the thief, the
-// guards and their vision cones, the sweeping cameras, the loot, the alarm meter and
-// the exit. step() advances one fixed step and returns what happened as bit flags, so
-// the caller can react without the world knowing about screens or sound. The whole
-// simulation is deterministic for a fixed seed.
-import { ALARM, CAMERA, FIELD, GUARD, LOOT, PLAYER, TILE } from './config.js';
-import { LEVELS } from './levels.js';
+// world.js — the simulation: movement, vision, alarm, loot, bust, exit.
+// Pure logic, no DOM and no canvas, so the same code runs in the browser
+// and in the headless sim tests. Everything here is deterministic: the
+// same inputs over the same steps always give the same world.
 
-export const EVENT_PICKUP = 1;
-export const EVENT_BIG_LOOT = 2;
-export const EVENT_SPOTTED = 4;
-export const EVENT_ALARM_ON = 8;
-export const EVENT_ALARM_OFF = 16;
-export const EVENT_CAUGHT = 32;
-export const EVENT_LEVEL_DONE = 64;
-export const EVENT_WIN = 128;
+import {
+  TILE,
+  THIEF_WALK_SPEED,
+  THIEF_SNEAK_SPEED,
+  GUARD_PATROL_SPEED,
+  GUARD_CHASE_SPEED,
+  GUARD_INVESTIGATE_SPEED,
+  GUARD_SIGHT_RANGE,
+  GUARD_SNEAK_RANGE,
+  GUARD_FOV,
+  CAMERA_SIGHT_RANGE,
+  CAMERA_SNEAK_RANGE,
+  CAMERA_FOV,
+  CAMERA_SWEEP,
+  CAMERA_SWEEP_SPEED,
+  ALARM_GUARD_RATE,
+  ALARM_CAMERA_RATE,
+  ALARM_DECAY_RATE,
+  ALARM_MAX,
+  GRAB_TIME,
+  GRAB_RADIUS,
+  PICKUP_RADIUS,
+  BUST_RADIUS,
+  COINS_PER_JOB,
+  COIN_COST,
+  COIN_THROW_DIST,
+  COIN_HEAR_RANGE,
+  COIN_INVESTIGATE_TIME,
+  THIEF_RADIUS,
+  GUARD_RADIUS,
+} from './config.js';
+import { parseLevel, isWall } from './levels.js';
+import { mulberry32 } from './random.js';
 
-const SOLID_TILES = new Set(['#', 'o']);
-
-function tileAt(level, col, row) {
-  if (col < 0 || row < 0 || col >= 32 || row >= 18) return '#';
-  return level.map[row][col];
+// Smallest signed turn from angle a to angle b, in (-PI, PI].
+export function angleDiff(a, b) {
+  let d = b - a;
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d <= -Math.PI) d += 2 * Math.PI;
+  return d;
 }
 
-function isSolid(level, col, row) {
-  return SOLID_TILES.has(tileAt(level, col, row));
+function dist(ax, ay, bx, by) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  return Math.hypot(dx, dy);
 }
 
-/** True when the straight line from (x0, y0) to (x1, y1) crosses no solid tile. The
- * watcher's own tile never blocks its sight: a camera sits inside a wall tile. */
-export function hasLineOfSight(level, x0, y0, x1, y1) {
-  const dx = x1 - x0;
-  const dy = y1 - y0;
-  const dist = Math.hypot(dx, dy);
-  const steps = Math.max(1, Math.ceil(dist / 8));
-  const homeCol = Math.floor(x0 / TILE);
-  const homeRow = Math.floor(y0 / TILE);
-  for (let i = 1; i < steps; i += 1) {
-    const x = x0 + (dx * i) / steps;
-    const y = y0 + (dy * i) / steps;
-    const col = Math.floor(x / TILE);
-    const row = Math.floor(y / TILE);
-    if (col === homeCol && row === homeRow) continue;
-    if (isSolid(level, col, row)) return false;
+// Line of sight on the tile grid. Steps along the line and checks each
+// tile it passes through; the watcher's own tile never blocks (a camera
+// sits inside a wall tile and still has to see out of it).
+export function hasLineOfSight(walls, x0, y0, x1, y1) {
+  const d = dist(x0, y0, x1, y1);
+  const steps = Math.max(1, Math.ceil(d * 8));
+  const homeX = Math.floor(x0);
+  const homeY = Math.floor(y0);
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const px = x0 + (x1 - x0) * t;
+    const py = y0 + (y1 - y0) * t;
+    const tx = Math.floor(px);
+    const ty = Math.floor(py);
+    if (tx === homeX && ty === homeY) continue;
+    if (isWall(walls, tx, ty)) return false;
   }
   return true;
 }
 
-function angleDifference(a, b) {
-  let d = a - b;
-  while (d > Math.PI) d -= Math.PI * 2;
-  while (d < -Math.PI) d += Math.PI * 2;
-  return d;
+// Does a watcher at (wx, wy), facing `facing`, see the thief?
+// Sneaking halves the range. Walls block the view.
+export function canSee(walls, wx, wy, facing, range, sneakRange, fov, tx, ty, sneaking) {
+  const d = dist(wx, wy, tx, ty);
+  const maxRange = sneaking ? sneakRange : range;
+  if (d > maxRange) return false;
+  if (d < 0.01) return true;
+  const toThief = Math.atan2(ty - wy, tx - wx);
+  if (Math.abs(angleDiff(facing, toThief)) > fov / 2) return false;
+  return hasLineOfSight(walls, wx, wy, tx, ty);
 }
 
-/** True when a watcher at (x, y) facing `angle` can see the thief. */
-function canSee(level, x, y, angle, range, halfAngle, player, sneak) {
-  const dx = player.x - x;
-  const dy = player.y - y;
-  const dist = Math.hypot(dx, dy);
-  const effectiveRange = sneak ? range * 0.55 : range;
-  if (dist > effectiveRange) return false;
-  if (Math.abs(angleDifference(Math.atan2(dy, dx), angle)) > halfAngle) return false;
-  return hasLineOfSight(level, x, y, player.x, player.y);
+// A circle (the thief or a guard) sliding against walls: try x, then y,
+// so movement slides along a wall instead of sticking to it.
+function moveCircle(walls, body, dx, dy, radius) {
+  const nx = body.x + dx;
+  if (!circleHitsWall(walls, nx, body.y, radius)) body.x = nx;
+  const ny = body.y + dy;
+  if (!circleHitsWall(walls, body.x, ny, radius)) body.y = ny;
 }
 
-export function createWorld(random) {
-  const state = {
-    levelIndex: 0,
-    level: LEVELS[0],
-    player: { x: 0, y: 0, facing: 0, sneak: false, moving: false },
-    guards: [],
-    cameras: [],
-    loot: [],
-    exit: { x: 0, y: 0 },
+function circleHitsWall(walls, x, y, radius) {
+  const minX = Math.floor(x - radius);
+  const maxX = Math.floor(x + radius);
+  const minY = Math.floor(y - radius);
+  const maxY = Math.floor(y + radius);
+  for (let ty = minY; ty <= maxY; ty++) {
+    for (let tx = minX; tx <= maxX; tx++) {
+      if (!isWall(walls, tx, ty)) continue;
+      // Closest point on the wall tile to the circle centre.
+      const cx = Math.max(tx, Math.min(x, tx + 1));
+      const cy = Math.max(ty, Math.min(y, ty + 1));
+      const ddx = x - cx;
+      const ddy = y - cy;
+      if (ddx * ddx + ddy * ddy < radius * radius) return true;
+    }
+  }
+  return false;
+}
+
+export function createWorld(levelIndex, seed) {
+  const parsed = parseLevel(levelIndex);
+  const rng = mulberry32(seed == null ? 7 : seed);
+  const guards = parsed.level.guards.map((g) => {
+    const [wx, wy] = g.waypoints[0];
+    return {
+      x: wx + 0.5,
+      y: wy + 0.5,
+      angle: 0,
+      waypoints: g.waypoints,
+      wpIndex: 1 % g.waypoints.length,
+      mode: 'patrol',
+      investigateT: 0,
+      targetX: 0,
+      targetY: 0,
+      seesThief: false,
+    };
+  });
+  const cameras = parsed.level.cameras.map((c) => ({
+    x: c.x + 0.5,
+    y: c.y + 0.5,
+    baseAngle: c.angle,
+    angle: c.angle,
+    phase: rng() * Math.PI * 2,
+    seesThief: false,
+  }));
+  return {
+    levelIndex,
+    level: parsed.level,
+    walls: parsed.walls,
+    exit: parsed.exit,
+    loot: parsed.loot,
+    totalValue: parsed.totalValue,
+    thief: { x: parsed.spawn.x, y: parsed.spawn.y, angle: Math.PI / 2, moving: false },
+    guards,
+    cameras,
     alarm: 0,
-    alarmed: false,
-    seenNow: false,
-    seenBy: null,
+    alarmEverRose: false,
+    chase: false,
     lootValue: 0,
-    lootTarget: 0,
-    elapsed: 0,
-    totalLoot: 0,
-    totalTime: 0,
-    ghost: true,
+    coins: COINS_PER_JOB,
+    coinMark: null, // {x, y, age} of the last tossed coin, for the renderer
+    grabbing: null,
     grabProgress: 0,
-    grabTarget: null,
-    levelDone: false,
+    spotted: false,
     busted: false,
-    won: false,
-    dust: [],
+    exited: false,
+    time: 0,
   };
+}
 
-  function loadLevel(index) {
-    const level = LEVELS[index];
-    state.levelIndex = index;
-    state.level = level;
-    state.lootTarget = level.target;
-    state.lootValue = 0;
-    state.alarm = 0;
-    state.alarmed = false;
-    state.seenNow = false;
-    state.seenBy = null;
-    state.elapsed = 0;
-    state.grabProgress = 0;
-    state.grabTarget = null;
-    state.levelDone = false;
-    state.busted = false;
-    state.dust = [];
-    for (let i = 0; i < 70; i += 1) {
-      state.dust.push({ x: random() * FIELD.width, y: random() * FIELD.height, s: 0.4 + random() * 0.9, p: random() * Math.PI * 2 });
-    }
-    state.guards = level.guards.map((g) => {
-      const [cx, cy] = g.waypoints[0];
-      return {
-        waypoints: g.waypoints.map(([wx, wy]) => ({ x: (wx + 0.5) * TILE, y: (wy + 0.5) * TILE })),
-        pause: g.pause,
-        x: (cx + 0.5) * TILE,
-        y: (cy + 0.5) * TILE,
-        target: 1,
-        waiting: 0,
-        facing: 0,
-        chasing: false,
-        loseSight: 0,
-        seesPlayer: false,
-      };
-    });
-    state.cameras = level.cameras.map((c) => ({
-      x: (c.tile[0] + 0.5) * TILE,
-      y: (c.tile[1] + 0.5) * TILE,
-      baseAngle: c.baseAngle,
-      sweep: c.sweep,
-      angle: c.baseAngle,
-      seesPlayer: false,
-    }));
-    state.loot = [];
-    level.map.forEach((row, r) => {
-      [...row].forEach((ch, c) => {
-        if (ch === 'P') {
-          state.player.x = (c + 0.5) * TILE;
-          state.player.y = (r + 0.5) * TILE;
-          state.player.facing = 0;
-        } else if (ch === 'E') {
-          state.exit.x = (c + 0.5) * TILE;
-          state.exit.y = (r + 0.5) * TILE;
-        } else if (ch === 'L' || ch === 'J' || ch === 'A' || ch === 'V') {
-          state.loot.push({
-            kind: ch,
-            value: LOOT.values[ch],
-            big: ch === 'A' || ch === 'V',
-            x: (c + 0.5) * TILE,
-            y: (r + 0.5) * TILE,
-            taken: false,
-          });
-        }
-      });
-    });
+// One fixed step. `input` is {mx, my, sneak, toss} with mx/my a direction
+// in [-1, 1]. `opts.harmless` steps patrols only: the title screen runs
+// the world behind it without any guard ever catching the idle thief.
+export function stepWorld(world, input, dt, opts) {
+  const harmless = opts && opts.harmless;
+  const walls = world.walls;
+  world.time += dt;
+  // The renderer draws shorter cones while the thief sneaks.
+  world.sneakHeld = !!input.sneak;
+
+  // --- the thief ---------------------------------------------------------
+  const thief = world.thief;
+  const speed = input.sneak ? THIEF_SNEAK_SPEED : THIEF_WALK_SPEED;
+  const len = Math.hypot(input.mx, input.my);
+  thief.moving = len > 0.01;
+  if (thief.moving) {
+    const nx = input.mx / (len || 1);
+    const ny = input.my / (len || 1);
+    thief.angle = Math.atan2(ny, nx);
+    moveCircle(walls, thief, nx * speed * dt, ny * speed * dt, THIEF_RADIUS);
   }
 
-  function reset() {
-    state.totalLoot = 0;
-    state.totalTime = 0;
-    state.ghost = true;
-    state.won = false;
-    loadLevel(0);
-  }
-
-  function moveCircle(entity, dx, dy) {
-    // Move one axis at a time so the circle slides along walls instead of sticking.
-    const r = PLAYER.radius;
-    let nx = entity.x + dx;
-    const top = Math.floor((entity.y - r) / TILE);
-    const bottom = Math.floor((entity.y + r) / TILE);
-    for (const row of [top, bottom]) {
-      for (const col of [Math.floor((nx - r) / TILE), Math.floor((nx + r) / TILE)]) {
-        if (!isSolid(state.level, col, row)) continue;
-        if (dx > 0) nx = Math.min(nx, col * TILE - r - 0.01);
-        else if (dx < 0) nx = Math.max(nx, (col + 1) * TILE + r + 0.01);
+  // --- coin toss: a $100 distraction, three per job ----------------------
+  if (input.toss && world.coins > 0 && !harmless) {
+    world.coins -= 1;
+    world.lootValue = Math.max(0, world.lootValue - COIN_COST);
+    const cx = thief.x + Math.cos(thief.angle) * COIN_THROW_DIST;
+    const cy = thief.y + Math.sin(thief.angle) * COIN_THROW_DIST;
+    world.coinMark = { x: cx, y: cy, age: 0 };
+    for (const guard of world.guards) {
+      if (guard.mode === 'chase') continue;
+      if (dist(guard.x, guard.y, cx, cy) <= COIN_HEAR_RANGE) {
+        guard.mode = 'investigate';
+        guard.targetX = cx;
+        guard.targetY = cy;
+        guard.investigateT = 0;
       }
     }
-    entity.x = nx;
-    let ny = entity.y + dy;
-    const left = Math.floor((entity.x - r) / TILE);
-    const right = Math.floor((entity.x + r) / TILE);
-    for (const col of [left, right]) {
-      for (const row of [Math.floor((ny - r) / TILE), Math.floor((ny + r) / TILE)]) {
-        if (!isSolid(state.level, col, row)) continue;
-        if (dy > 0) ny = Math.min(ny, row * TILE - r - 0.01);
-        else if (dy < 0) ny = Math.max(ny, (row + 1) * TILE + r + 0.01);
-      }
-    }
-    entity.y = ny;
+  }
+  if (world.coinMark) {
+    world.coinMark.age += dt;
+    if (world.coinMark.age > 1.2) world.coinMark = null;
   }
 
-  function stepGuard(guard, dt) {
-    const player = state.player;
-    if (guard.chasing) {
-      const dx = player.x - guard.x;
-      const dy = player.y - guard.y;
-      const dist = Math.hypot(dx, dy);
-      if (dist > 1) {
-        guard.facing = Math.atan2(dy, dx);
-        const step = Math.min(dist, GUARD.chaseSpeed * dt);
-        // Chase steering moves straight at the thief and lets the walls slide it.
-        moveCircle(guard, (dx / dist) * step, (dy / dist) * step);
+  // --- cameras sweep ------------------------------------------------------
+  for (const cam of world.cameras) {
+    cam.angle = cam.baseAngle + Math.sin(world.time * CAMERA_SWEEP_SPEED + cam.phase) * CAMERA_SWEEP;
+    cam.seesThief = false;
+  }
+
+  // --- guards: patrol, chase, investigate ---------------------------------
+  for (const guard of world.guards) {
+    guard.seesThief = false;
+    if (guard.mode === 'chase' || world.chase) {
+      const d = dist(guard.x, guard.y, thief.x, thief.y);
+      if (d > 0.01) {
+        const nx = (thief.x - guard.x) / d;
+        const ny = (thief.y - guard.y) / d;
+        guard.angle = Math.atan2(ny, nx);
+        moveCircle(walls, guard, nx * GUARD_CHASE_SPEED * dt, ny * GUARD_CHASE_SPEED * dt, GUARD_RADIUS);
       }
-      if (!guard.seesPlayer) {
-        guard.loseSight += dt;
-        if (guard.loseSight >= GUARD.loseSightAfter) {
-          guard.chasing = false;
-          guard.loseSight = 0;
-          // Walk back to the nearest waypoint.
-          let best = 0;
-          let bestDist = Infinity;
-          guard.waypoints.forEach((w, i) => {
-            const d = Math.hypot(w.x - guard.x, w.y - guard.y);
-            if (d < bestDist) { bestDist = d; best = i; }
-          });
-          guard.target = best;
-        }
+    } else if (guard.mode === 'investigate') {
+      const d = dist(guard.x, guard.y, guard.targetX, guard.targetY);
+      if (d > 0.15) {
+        const nx = (guard.targetX - guard.x) / d;
+        const ny = (guard.targetY - guard.y) / d;
+        guard.angle = Math.atan2(ny, nx);
+        moveCircle(walls, guard, nx * GUARD_INVESTIGATE_SPEED * dt, ny * GUARD_INVESTIGATE_SPEED * dt, GUARD_RADIUS);
       } else {
-        guard.loseSight = 0;
+        guard.investigateT += dt;
+        if (guard.investigateT >= COIN_INVESTIGATE_TIME) guard.mode = 'patrol';
       }
-      return;
+    } else {
+      const wp = guard.waypoints[guard.wpIndex];
+      const tx = wp[0] + 0.5;
+      const ty = wp[1] + 0.5;
+      const d = dist(guard.x, guard.y, tx, ty);
+      if (d < 0.12) {
+        guard.wpIndex = (guard.wpIndex + 1) % guard.waypoints.length;
+      } else {
+        const nx = (tx - guard.x) / d;
+        const ny = (ty - guard.y) / d;
+        guard.angle = Math.atan2(ny, nx);
+        moveCircle(walls, guard, nx * GUARD_PATROL_SPEED * dt, ny * GUARD_PATROL_SPEED * dt, GUARD_RADIUS);
+      }
     }
-    if (guard.waiting > 0) {
-      guard.waiting -= dt;
-      return;
-    }
-    const target = guard.waypoints[guard.target];
-    const dx = target.x - guard.x;
-    const dy = target.y - guard.y;
-    const dist = Math.hypot(dx, dy);
-    if (dist < 4) {
-      guard.target = (guard.target + 1) % guard.waypoints.length;
-      guard.waiting = guard.pause;
-      const next = guard.waypoints[guard.target];
-      guard.facing = Math.atan2(next.y - guard.y, next.x - guard.x);
-      return;
-    }
-    guard.facing = Math.atan2(dy, dx);
-    const step = Math.min(dist, GUARD.patrolSpeed * dt);
-    moveCircle(guard, (dx / dist) * step, (dy / dist) * step);
   }
 
-  /**
-   * One fixed step. `move` is {x, y} in [-1, 1] (keyboard or click-to-move steering),
-   * `sneak` halves the speed and shrinks the guards' sight. With `harmless` set (the
-   * title screen's backdrop) the guards patrol and the cameras sweep, but nothing is
-   * seen, no alarm rises and nothing is caught or collected. Returns event flags.
-   */
-  function step(dt, move, sneak, harmless) {
-    let events = 0;
-    if (state.levelDone || state.busted || state.won) return events;
-    state.elapsed += dt;
-    state.totalTime += dt;
-
-    const player = state.player;
-    const speed = sneak ? PLAYER.sneakSpeed : PLAYER.walkSpeed;
-    const len = Math.hypot(move.x, move.y);
-    player.sneak = sneak;
-    player.moving = len > 0.1;
-    if (len > 0.1) {
-      const nx = (move.x / Math.max(1, len)) * speed * dt;
-      const ny = (move.y / Math.max(1, len)) * speed * dt;
-      moveCircle(player, nx, ny);
-      player.facing = Math.atan2(move.y, move.x);
-    }
-
-    // The cameras sweep whatever the screen: their angle is the clock, not the alarm.
-    for (const camera of state.cameras) {
-      camera.angle = camera.baseAngle + Math.sin(state.elapsed * CAMERA.sweepSpeed) * camera.sweep;
-    }
-    if (harmless) {
-      for (const guard of state.guards) stepGuard(guard, dt);
-      return events;
-    }
-
-    // Vision: guards and cameras watch the thief; being seen feeds the alarm.
-    let seen = false;
-    let seenBy = null;
-    for (const guard of state.guards) {
-      guard.seesPlayer = canSee(state.level, guard.x, guard.y, guard.facing, GUARD.visionRange, GUARD.visionHalfAngle, player, sneak);
-      if (guard.seesPlayer) { seen = true; seenBy = 'guard'; }
-    }
-    for (const camera of state.cameras) {
-      camera.seesPlayer = canSee(state.level, camera.x, camera.y, camera.angle, CAMERA.visionRange, CAMERA.visionHalfAngle, player, sneak);
-      if (camera.seesPlayer) { seen = true; seenBy = seenBy ?? 'camera'; }
-    }
-    const wasSeen = state.seenNow;
-    state.seenNow = seen;
-    state.seenBy = seen ? seenBy : null;
-    if (seen && !wasSeen) events |= EVENT_SPOTTED;
-
-    if (seen) {
-      state.alarm += (seenBy === 'guard' ? ALARM.guardSeen : ALARM.cameraSeen) * dt;
-      for (const guard of state.guards) {
-        if (guard.seesPlayer) { guard.chasing = true; guard.loseSight = 0; }
-      }
-    } else if (state.alarmed) {
-      state.alarm -= ALARM.decayAlarmed * dt;
-    } else {
-      state.alarm -= ALARM.decay * dt;
-    }
-    state.alarm = Math.max(0, Math.min(100, state.alarm));
-    if (state.alarm >= 100 && !state.alarmed) {
-      state.alarmed = true;
-      state.ghost = false;
-      for (const guard of state.guards) { guard.chasing = true; guard.loseSight = 0; }
-      events |= EVENT_ALARM_ON;
-    } else if (state.alarmed && state.alarm < ALARM.offBelow) {
-      state.alarmed = false;
-      events |= EVENT_ALARM_OFF;
-    }
-
-    for (const guard of state.guards) stepGuard(guard, dt);
-
-    // Caught: a guard close enough to lay a hand on the thief ends the heist.
-    for (const guard of state.guards) {
-      if (Math.hypot(guard.x - player.x, guard.y - player.y) < PLAYER.catchDistance) {
-        state.busted = true;
-        events |= EVENT_CAUGHT;
-        return events;
+  // --- vision -------------------------------------------------------------
+  let seenRate = 0;
+  let seenByGuard = false;
+  let seenByCamera = false;
+  if (!harmless) {
+    for (const guard of world.guards) {
+      const seen = canSee(
+        walls, guard.x, guard.y, guard.angle,
+        GUARD_SIGHT_RANGE, GUARD_SNEAK_RANGE, GUARD_FOV,
+        thief.x, thief.y, input.sneak,
+      );
+      guard.seesThief = seen;
+      if (seen) {
+        seenByGuard = true;
+        seenRate = Math.max(seenRate, ALARM_GUARD_RATE);
       }
     }
+    for (const cam of world.cameras) {
+      const seen = canSee(
+        walls, cam.x, cam.y, cam.angle,
+        CAMERA_SIGHT_RANGE, CAMERA_SNEAK_RANGE, CAMERA_FOV,
+        thief.x, thief.y, input.sneak,
+      );
+      cam.seesThief = seen;
+      if (seen) {
+        seenByCamera = true;
+        seenRate = Math.max(seenRate, ALARM_CAMERA_RATE);
+      }
+    }
+  }
+  world.spotted = seenByGuard || seenByCamera;
 
-    // Loot: small pieces lift on touch; the big ones take a second of steady hands.
-    let grabbing = null;
-    for (const item of state.loot) {
-      if (item.taken) continue;
-      const dist = Math.hypot(item.x - player.x, item.y - player.y);
-      if (item.big) {
-        if (dist < 46) grabbing = item;
-      } else if (dist < 26) {
+  // --- alarm ---------------------------------------------------------------
+  if (seenRate > 0) {
+    world.alarm = Math.min(ALARM_MAX, world.alarm + seenRate * dt);
+    world.alarmEverRose = true;
+  } else {
+    world.alarm = Math.max(0, world.alarm - ALARM_DECAY_RATE * dt);
+  }
+  if (world.alarm >= ALARM_MAX) world.chase = true;
+  if (world.chase && world.alarm < 35) {
+    world.chase = false;
+    for (const guard of world.guards) if (guard.mode === 'chase') guard.mode = 'patrol';
+  }
+  if (world.chase) {
+    for (const guard of world.guards) {
+      if (guard.mode !== 'investigate') guard.mode = 'chase';
+    }
+  }
+
+  // --- loot -----------------------------------------------------------------
+  let nearestBig = null;
+  let nearestBigDist = Infinity;
+  for (const item of world.loot) {
+    if (item.taken) continue;
+    const d = dist(thief.x, thief.y, item.x, item.y);
+    if (item.kind === 'small') {
+      if (d <= PICKUP_RADIUS) {
         item.taken = true;
-        state.lootValue += item.value;
-        state.totalLoot += item.value;
-        events |= EVENT_PICKUP;
+        world.lootValue += item.value;
       }
+    } else if (d <= GRAB_RADIUS && d < nearestBigDist) {
+      nearestBig = item;
+      nearestBigDist = d;
     }
-    if (grabbing !== null) {
-      if (state.grabTarget !== grabbing) {
-        state.grabTarget = grabbing;
-        state.grabProgress = 0;
-      }
-      state.grabProgress += dt / LOOT.bigGrabSeconds;
-      if (state.grabProgress >= 1) {
-        grabbing.taken = true;
-        state.lootValue += grabbing.value;
-        state.totalLoot += grabbing.value;
-        state.grabTarget = null;
-        state.grabProgress = 0;
-        events |= EVENT_BIG_LOOT;
-      }
-    } else {
-      state.grabTarget = null;
-      state.grabProgress = 0;
+  }
+  if (nearestBig && !harmless) {
+    world.grabbing = nearestBig;
+    nearestBig.progress += dt / GRAB_TIME;
+    world.grabProgress = Math.min(1, nearestBig.progress);
+    if (nearestBig.progress >= 1) {
+      nearestBig.taken = true;
+      world.lootValue += nearestBig.value;
+      world.grabbing = null;
+      world.grabProgress = 0;
     }
-
-    // The exit only opens once the level's target is met.
-    const exitDist = Math.hypot(state.exit.x - player.x, state.exit.y - player.y);
-    if (exitDist < 34 && state.lootValue >= state.lootTarget) {
-      state.levelDone = true;
-      events |= EVENT_LEVEL_DONE;
-      if (state.levelIndex >= LEVELS.length - 1) {
-        state.won = true;
-        events |= EVENT_WIN;
-      }
+  } else {
+    world.grabbing = null;
+    world.grabProgress = 0;
+    for (const item of world.loot) {
+      if (!item.taken && item.kind !== 'small') item.progress = 0;
     }
-    return events;
   }
 
-  function nextLevel() {
-    loadLevel(state.levelIndex + 1);
+  // --- bust: a guard touches the thief ---------------------------------------
+  if (!harmless) {
+    for (const guard of world.guards) {
+      if (dist(guard.x, guard.y, thief.x, thief.y) <= BUST_RADIUS) {
+        world.busted = true;
+      }
+    }
   }
 
-  reset();
-  return { state, reset, loadLevel, nextLevel, step, hasLineOfSight: (x0, y0, x1, y1) => hasLineOfSight(state.level, x0, y0, x1, y1) };
+  // --- exit -------------------------------------------------------------------
+  if (!harmless && !world.busted && world.lootValue >= world.level.target) {
+    if (dist(thief.x, thief.y, world.exit.x, world.exit.y) <= 0.8) {
+      world.exited = true;
+    }
+  }
+  return world;
+}
+
+// How many tiles of open floor the thief can reach from the spawn —
+// used by the level validator, not by the game itself.
+export function floodFillCount(walls, sx, sy) {
+  const seen = new Set();
+  const queue = [[Math.floor(sx), Math.floor(sy)]];
+  while (queue.length) {
+    const [x, y] = queue.pop();
+    const key = x + ',' + y;
+    if (seen.has(key) || isWall(walls, x, y)) continue;
+    seen.add(key);
+    queue.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
+  }
+  return seen.size;
 }

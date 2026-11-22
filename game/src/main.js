@@ -1,212 +1,211 @@
-// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s
-// steps (several in a slow frame, none in a fast one), and the renderer paints what is
-// there. The game moves between seven screens: title, briefing, play, paused, level done,
-// busted and the final tally.
-//
-// ?seed=N fixes the dust and the level layouts' random touches. ?shot=title|stealth|
-// spotted|vault (with &seed=N) stages that scene instead of running the loop, paints it
-// twice and sets window.__shotReady for a screenshot.
-import { BEST_KEY, FIELD, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, EVENT_ALARM_OFF, EVENT_ALARM_ON, EVENT_BIG_LOOT, EVENT_CAUGHT, EVENT_LEVEL_DONE, EVENT_PICKUP, EVENT_SPOTTED, EVENT_WIN } from './world.js';
-import { ACTION_CONFIRM, ACTION_MUTE, ACTION_PAUSE, ACTION_RESTART, createInput } from './input.js';
+// main.js — the app shell: fixed-step loop, screen flow, shot staging.
+// Screens: title -> brief -> playing -> (busted | jobDone) -> brief ->
+// ... -> heistDone. P pauses, M mutes, R restarts the job. The world
+// steps at a fixed 60 Hz so play is the same on any machine; the title
+// screen steps the world in harmless mode so the guards patrol behind it
+// without ever catching the idle thief.
+
+import { VIEW_W, VIEW_H, GHOST_BONUS } from './config.js';
+import { LEVELS } from './levels.js';
+import { createWorld, stepWorld } from './world.js';
+import {
+  drawWorld,
+  drawHud,
+  drawTitle,
+  drawBrief,
+  drawPaused,
+  drawBusted,
+  drawJobDone,
+  drawHeistDone,
+} from './render.js';
+import { createInput } from './input.js';
 import { createAudio } from './audio.js';
-import { createRenderer, SCREEN_BRIEF, SCREEN_BUSTED, SCREEN_LEVEL_DONE, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE, SCREEN_WIN } from './render.js';
 import { stageShot } from './shots.js';
 
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
-const MAX_FRAME = 0.25;
+const STEP = 1 / 60;
 
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
-
-const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
-const renderer = createRenderer(canvas);
-const audio = createAudio();
-
-/** Turn a pointer position on the page into a point in the 1280x720 playfield. */
-function toWorld(clientX, clientY) {
-  const scale = Math.min(window.innerWidth / FIELD.width, window.innerHeight / FIELD.height);
-  const offsetX = (window.innerWidth - FIELD.width * scale) / 2;
-  const offsetY = (window.innerHeight - FIELD.height * scale) / 2;
-  return { x: (clientX - offsetX) / scale, y: (clientY - offsetY) / scale };
+function newJob(app, jobIndex) {
+  app.jobIndex = jobIndex;
+  app.world = createWorld(jobIndex, 7);
+  app.screen = 'brief';
 }
 
-function runShot(name) {
-  const scene = stageShot(name, world);
-  let painted = 0;
-  function paint() {
-    renderer.draw(world.state, scene.screen, scene.best);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
+function restartJob(app) {
+  app.world = createWorld(app.jobIndex, 7);
+  app.screen = 'brief';
+}
+
+function restartAll(app) {
+  app.totalLoot = 0;
+  app.ghost = true;
+  newJob(app, 0);
+}
+
+export function startGame(canvas) {
+  const ctx = canvas.getContext('2d');
+  const input = createInput(canvas);
+  const audio = createAudio();
+  const params = new URLSearchParams(window.location.search);
+  const shotName = params.get('shot');
+
+  const app = {
+    screen: 'title',
+    jobIndex: 0,
+    world: createWorld(0, 7),
+    totalLoot: 0,
+    ghost: true, // stays true only while the alarm never rose on any job
+    prevLoot: 0,
+    prevSpotted: false,
+  };
+  window.__game = app;
+
+  if (shotName) {
+    // Screenshot mode: stage one frozen frame and never step it, so the
+    // render the screenshot takes is exactly the staged one. Fit the
+    // canvas first, or a short viewport would crop the HUD off the top.
+    fitCanvas();
+    const staged = stageShot(shotName);
+    app.screen = staged.screen;
+    app.world = staged.world;
+    app.jobIndex = staged.app.jobIndex;
+    app.totalLoot = staged.app.totalLoot;
+    app.ghost = staged.app.ghost;
+    app.prevLoot = app.world.lootValue;
+    renderFrame();
+    window.__shotReady = true;
+    return app;
   }
-  requestAnimationFrame(paint);
-}
 
-function runGame() {
-  const input = createInput(canvas, toWorld);
-  let screen = SCREEN_TITLE;
-  let best = readBest();
-  let accumulator = 0;
+  function advance() {
+    if (app.screen === 'title') {
+      audio.ensure();
+      newJob(app, 0);
+    } else if (app.screen === 'brief') {
+      app.screen = 'playing';
+      input.clearPressed();
+    } else if (app.screen === 'jobDone') {
+      audio.ensure();
+      if (app.jobIndex + 1 < LEVELS.length) newJob(app, app.jobIndex + 1);
+      else app.screen = 'heistDone';
+    }
+  }
+
+  function stepPlaying() {
+    const world = app.world;
+    const polled = input.poll(world.thief);
+    const stepInput = {
+      mx: polled.mx,
+      my: polled.my,
+      sneak: polled.sneak,
+      toss: input.wasPressed('KeyF'),
+    };
+    stepWorld(world, stepInput, STEP, {});
+    world.sneakHeld = polled.sneak;
+
+    if (world.lootValue > app.prevLoot) {
+      if (world.lootValue - app.prevLoot >= 2000) audio.grab();
+      else audio.pickup();
+    }
+    app.prevLoot = world.lootValue;
+    if (world.spotted && !app.prevSpotted) audio.spotted();
+    app.prevSpotted = world.spotted;
+    audio.setAlarmLevel(world.alarm);
+
+    if (world.busted) {
+      audio.busted();
+      audio.setAlarmLevel(0);
+      app.screen = 'busted';
+    } else if (world.exited) {
+      app.totalLoot += world.lootValue;
+      if (world.alarmEverRose) app.ghost = false;
+      if (app.jobIndex + 1 >= LEVELS.length) {
+        audio.heistDone();
+        app.screen = 'heistDone';
+      } else {
+        audio.jobDone();
+        app.screen = 'jobDone';
+      }
+    }
+  }
+
+  function renderFrame() {
+    ctx.clearRect(0, 0, VIEW_W, VIEW_H);
+    drawWorld(ctx, app.world);
+    if (app.screen === 'playing' || app.screen === 'paused') drawHud(ctx, app.world, app);
+    if (app.screen === 'title') {
+      drawHud(ctx, app.world, app);
+      drawTitle(ctx, app.world);
+    } else if (app.screen === 'brief') {
+      drawBrief(ctx, LEVELS[app.jobIndex]);
+    } else if (app.screen === 'paused') {
+      drawPaused(ctx);
+    } else if (app.screen === 'busted') {
+      drawHud(ctx, app.world, app);
+      drawBusted(ctx, app.world);
+    } else if (app.screen === 'jobDone') {
+      drawHud(ctx, app.world, app);
+      drawJobDone(ctx, app.world, app);
+    } else if (app.screen === 'heistDone') {
+      drawHeistDone(ctx, app);
+    }
+  }
+
+  // Fit the 1280x720 canvas into the window, letterboxed.
+  function fitCanvas() {
+    const scale = Math.min(window.innerWidth / VIEW_W, window.innerHeight / VIEW_H);
+    canvas.style.width = Math.floor(VIEW_W * scale) + 'px';
+    canvas.style.height = Math.floor(VIEW_H * scale) + 'px';
+  }
+  window.addEventListener('resize', fitCanvas);
+  fitCanvas();
+
   let last = performance.now();
-
-  function readBest() {
-    try {
-      return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
-    } catch {
-      return 0;
-    }
-  }
-
-  function saveBest(value) {
-    try {
-      window.localStorage.setItem(BEST_KEY, String(value));
-    } catch {
-      // Storage can be off (private windows): the best haul then lasts this visit only.
-    }
-  }
-
-  // Screen readers (and anyone watching the page's text) hear the screen changes.
-  function announce(message) {
-    status.textContent = message;
-  }
-
-  function finalHaul() {
-    return world.state.totalLoot + (world.state.ghost ? 1000 : 0);
-  }
-
-  function startLevel() {
-    screen = SCREEN_BRIEF;
-    announce(world.state.level.name + '. Target ' + world.state.lootTarget + ' dollars.');
-  }
-
-  function beginPlay() {
-    accumulator = 0;
-    screen = SCREEN_PLAY;
-    announce('Playing. Stay out of the vision cones.');
-  }
-
-  function endLevel() {
-    if (world.state.won) {
-      screen = SCREEN_WIN;
-      const haul = finalHaul();
-      if (haul > best) {
-        best = haul;
-        saveBest(best);
-      }
-      announce('The perfect heist. Total haul ' + haul + ' dollars.');
-    } else {
-      screen = SCREEN_LEVEL_DONE;
-      announce('Clean getaway. ' + world.state.lootValue + ' dollars from this room.');
-    }
-  }
-
-  function endBusted() {
-    screen = SCREEN_BUSTED;
-    announce('Busted. A guard caught you.');
-  }
-
-  function handleEvents(events) {
-    if (events & EVENT_PICKUP) audio.pickup();
-    if (events & EVENT_BIG_LOOT) audio.bigLoot();
-    if (events & EVENT_SPOTTED) {
-      audio.spotted();
-      announce('Spotted! Break line of sight.');
-    }
-    if (events & EVENT_ALARM_ON) audio.alarmStart();
-    if (events & EVENT_ALARM_OFF) audio.alarmStop();
-    if (events & EVENT_CAUGHT) {
-      audio.alarmStop();
-      audio.caught();
-      endBusted();
-    } else if (events & (EVENT_LEVEL_DONE | EVENT_WIN)) {
-      audio.alarmStop();
-      audio.win();
-      endLevel();
-    }
-  }
-
-  function handleActions() {
-    const actions = input.takeActions();
-    if (actions & ACTION_MUTE) {
-      const muted = audio.toggleMute();
-      announce(muted ? 'Sound off.' : 'Sound on.');
-    }
-    if (actions & ACTION_CONFIRM) {
-      audio.unlock();
-      audio.click();
-      if (screen === SCREEN_TITLE) startLevel();
-      else if (screen === SCREEN_BRIEF) beginPlay();
-      else if (screen === SCREEN_PAUSED) {
-        screen = SCREEN_PLAY;
-        announce('Playing.');
-      } else if (screen === SCREEN_LEVEL_DONE) {
-        world.nextLevel();
-        startLevel();
-      } else if (screen === SCREEN_BUSTED) {
-        world.loadLevel(world.state.levelIndex);
-        startLevel();
-      } else if (screen === SCREEN_WIN) {
-        world.reset();
-        screen = SCREEN_TITLE;
-        announce('The Aurelia Heist. Press Enter or click to plan the first job.');
-      }
-    }
-    if (actions & ACTION_PAUSE) {
-      if (screen === SCREEN_PLAY) {
-        screen = SCREEN_PAUSED;
-        announce('Paused.');
-      } else if (screen === SCREEN_PAUSED) {
-        screen = SCREEN_PLAY;
-        announce('Playing.');
-      }
-    }
-    if (actions & ACTION_RESTART && screen === SCREEN_PLAY) {
-      world.loadLevel(world.state.levelIndex);
-      startLevel();
-    }
-  }
-
-  function step() {
-    if (screen === SCREEN_TITLE) {
-      // The title screen's backdrop: guards patrol, nothing is at stake.
-      world.step(STEP, { x: 0, y: 0 }, false, true);
-      return;
-    }
-    if (screen !== SCREEN_PLAY) return;
-    const events = world.step(STEP, input.move(world.state.player), input.sneak());
-    handleEvents(events);
-  }
-
+  let acc = 0;
   function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
+    const elapsed = Math.min(0.25, (now - last) / 1000);
     last = now;
-    handleActions();
-    while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
-      step();
-      accumulator -= STEP;
+    acc += elapsed;
+    let steps = 0;
+    while (acc >= STEP && steps < 5) {
+      acc -= STEP;
+      steps += 1;
+      // Global keys, whatever the screen.
+      if (input.wasPressed('KeyM')) audio.toggleMute();
+      if (app.screen === 'playing') {
+        if (input.wasPressed('KeyP')) {
+          app.screen = 'paused';
+        } else if (input.wasPressed('KeyR')) {
+          restartJob(app);
+        } else {
+          stepPlaying();
+        }
+      } else if (app.screen === 'paused') {
+        if (input.wasPressed('KeyP')) app.screen = 'playing';
+        else if (input.wasPressed('KeyR')) restartJob(app);
+      } else if (app.screen === 'title') {
+        stepWorld(app.world, { mx: 0, my: 0, sneak: false, toss: false }, STEP, { harmless: true });
+        if (input.wasPressed('Enter') || input.wasPressed('NumpadEnter') || input.wasPressed('Pointer')) advance();
+      } else if (app.screen === 'brief') {
+        if (input.wasPressed('Enter') || input.wasPressed('NumpadEnter') || input.wasPressed('Pointer')) advance();
+      } else if (app.screen === 'busted') {
+        if (input.wasPressed('KeyR')) restartJob(app);
+      } else if (app.screen === 'jobDone') {
+        if (input.wasPressed('Enter') || input.wasPressed('NumpadEnter') || input.wasPressed('Pointer')) advance();
+      } else if (app.screen === 'heistDone') {
+        if (input.wasPressed('KeyR')) restartAll(app);
+      }
     }
-    if (screen !== SCREEN_TITLE && screen !== SCREEN_PLAY) accumulator = 0;
-    renderer.draw(world.state, screen, best);
+    if (steps === 5) acc = 0;
+    renderFrame();
+    requestAnimationFrame(frame);
   }
-
-  // Leaving the tab pauses a running game rather than letting guards close in unseen.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    }
-  });
-
-  announce('The Aurelia Heist. Press Enter or click to plan the first job.');
   requestAnimationFrame(frame);
+  return app;
 }
 
-if (shot) runShot(shot);
-else runGame();
+// Boot when this module loads.
+const canvas = document.getElementById('game');
+if (canvas) startGame(canvas);
+
+// Keep the ghost bonus value visible to the dossier's outline.
+export const GHOST_BONUS_VALUE = GHOST_BONUS;
